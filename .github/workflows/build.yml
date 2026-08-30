@@ -1,0 +1,30 @@
+﻿name: Build Installer
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  release:
+    types: [ published ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+
+    - name: Build Standalone Executable
+      run: |
+        csc /target:winexe /win32icon:assets/app_logo.ico /out:Antigravity-Persian-Installer.exe /r:System.Windows.Forms.dll,System.Drawing.dll,System.Web.Extensions.dll src/AntigravityPersianInstaller.cs
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Antigravity-Persian-Installer
+        path: Antigravity-Persian-Installer.exe

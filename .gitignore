@@ -1,0 +1,23 @@
+﻿# Visual Studio / .NET
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+[Dd]ebug/
+[Rr]elease/
+*.tmp
+*.temp_patch
+*.backup
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.BIN/
+
+# Node / Logs
+node_modules/
+npm-debug.log*
+*.log
