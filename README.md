@@ -20,15 +20,7 @@
 [⌨️ کلیدهای میانبر](#-کلیدهای-میانبر-کیبورد) •
 [🛠️ ساخت از سورس کد](#-نحوه-کامپایل-از-سورس-کد) •
 [English Readme](#-english-summary)
-
----
-
-<img src=""assets/installer_preview.png"" alt=""Antigravity Persian Installer"" width=""700"" />
-
 </div>
-
----
-
 ## ✨ ویژگی‌های کلیدی
 
 - ⚡ **فوق‌العاده سبک و پرسرعت (Ultra-Fast Engine - 120 FPS)**: بدون استفاده از MutationObserver سنگین، رندرینگ متون به صورت مستقیم توسط شتاب‌دهنده کرومیوم با خواص بومی direction: auto و unicode-bidi: plaintext انجام می‌شود.
