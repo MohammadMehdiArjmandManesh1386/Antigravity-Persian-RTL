@@ -11,73 +11,16 @@ using Microsoft.Win32;
 
 namespace AntigravityPersian
 {
-    public class FileEntry
-    {
-        public string FullPath;
-        public Dictionary<string, object> DictEntry;
-        public bool IsPreload;
-        public long OldOffset;
-        public long NewSize;
-    }
-
     public static class AsarHelper
     {
-        private static void CollectPackedFiles(Dictionary<string, object> files, string currentPath, List<FileEntry> packedList, long newPreloadSize)
+        public static void ExtractAll(string asarPath, string outDir)
         {
-            foreach (var kvp in files)
-            {
-                string name = kvp.Key;
-                var dict = kvp.Value as Dictionary<string, object>;
-                if (dict == null) continue;
-
-                string full = string.IsNullOrEmpty(currentPath) ? name : currentPath + "/" + name;
-
-                if (dict.ContainsKey("files"))
-                {
-                    CollectPackedFiles((Dictionary<string, object>)dict["files"], full, packedList, newPreloadSize);
-                }
-                else
-                {
-                    if (dict.ContainsKey("unpacked") && Convert.ToBoolean(dict["unpacked"]))
-                    {
-                        // Crucial: keep in header tree for Electron, but do NOT write to binary payload
-                        continue;
-                    }
-
-                    if (full == "dist/preload.js")
-                    {
-                        packedList.Add(new FileEntry
-                        {
-                            FullPath = full,
-                            DictEntry = dict,
-                            IsPreload = true,
-                            OldOffset = 0,
-                            NewSize = newPreloadSize
-                        });
-                    }
-                    else
-                    {
-                        long sz = Convert.ToInt64(dict["size"]);
-                        long off = Convert.ToInt64(dict["offset"]);
-                        packedList.Add(new FileEntry
-                        {
-                            FullPath = full,
-                            DictEntry = dict,
-                            IsPreload = false,
-                            OldOffset = off,
-                            NewSize = sz
-                        });
-                    }
-                }
-            }
-        }
-
-        public static void PatchPreloadLossless(string srcAsar, string destAsar, string newEngineCode)
-        {
-            using (var fs = new FileStream(srcAsar, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (var fs = new FileStream(asarPath, FileMode.Open, FileAccess.Read, FileShare.Read))
             using (var br = new BinaryReader(fs))
             {
-                br.ReadUInt32(); br.ReadUInt32(); br.ReadUInt32();
+                br.ReadUInt32();
+                br.ReadUInt32();
+                br.ReadUInt32();
                 uint headerSize = br.ReadUInt32();
                 byte[] headerBytes = br.ReadBytes((int)headerSize);
                 string json = Encoding.UTF8.GetString(headerBytes);
@@ -86,74 +29,130 @@ namespace AntigravityPersian
                 var root = jss.Deserialize<Dictionary<string, object>>(json);
                 long baseOffset = 16 + headerSize;
 
-                var files = (Dictionary<string, object>)root["files"];
-                var dist = (Dictionary<string, object>)((Dictionary<string, object>)files["dist"])["files"];
-                var preloadInfo = (Dictionary<string, object>)dist["preload.js"];
+                ExtractDict((Dictionary<string, object>)root["files"], fs, baseOffset, outDir);
+            }
+        }
 
-                long pSize = Convert.ToInt64(preloadInfo["size"]);
-                long pOffset = Convert.ToInt64(preloadInfo["offset"]);
+        private static void ExtractDict(Dictionary<string, object> files, FileStream fs, long baseOffset, string currentDir)
+        {
+            if (!Directory.Exists(currentDir)) Directory.CreateDirectory(currentDir);
 
-                fs.Seek(baseOffset + pOffset, SeekOrigin.Begin);
-                byte[] pBytes = new byte[pSize];
-                fs.Read(pBytes, 0, (int)pSize);
-                string preloadStr = Encoding.UTF8.GetString(pBytes);
+            foreach (var kvp in files)
+            {
+                string name = kvp.Key;
+                var info = kvp.Value as Dictionary<string, object>;
+                if (info == null) continue;
 
-                string engineTag = "/* ANTIGRAVITY-PERSIAN-RTL-ENGINE-V3 */";
-                if (preloadStr.Contains("ANTIGRAVITY-PERSIAN-RTL-ENGINE"))
+                string fullPath = Path.Combine(currentDir, name);
+
+                if (info.ContainsKey("files"))
                 {
-                    int idx = preloadStr.IndexOf("/* ANTIGRAVITY-PERSIAN-RTL-ENGINE");
-                    if (idx >= 0) preloadStr = preloadStr.Substring(0, idx).TrimEnd();
+                    ExtractDict((Dictionary<string, object>)info["files"], fs, baseOffset, fullPath);
                 }
-
-                preloadStr += "\r\n\r\n" + engineTag + "\r\n" + newEngineCode + "\r\n";
-                byte[] newPreloadBytes = Encoding.UTF8.GetBytes(preloadStr);
-
-                var packedList = new List<FileEntry>();
-                CollectPackedFiles(files, "", packedList, newPreloadBytes.Length);
-
-                long curOffset = 0;
-                foreach (var item in packedList)
+                else if (info.ContainsKey("size"))
                 {
-                    item.DictEntry["offset"] = curOffset.ToString();
-                    item.DictEntry["size"] = item.NewSize;
-                    curOffset += item.NewSize;
-                }
-
-                string newJson = jss.Serialize(root);
-                byte[] newHeaderBytes = Encoding.UTF8.GetBytes(newJson);
-                uint newHeaderSize = (uint)newHeaderBytes.Length;
-
-                using (var outFs = new FileStream(destAsar, FileMode.Create, FileAccess.Write))
-                using (var bw = new BinaryWriter(outFs))
-                {
-                    bw.Write((uint)4);
-                    bw.Write((uint)(newHeaderSize + 8));
-                    bw.Write((uint)(newHeaderSize + 4));
-                    bw.Write((uint)newHeaderSize);
-                    bw.Write(newHeaderBytes);
-
-                    byte[] copyBuf = new byte[65536];
-                    foreach (var item in packedList)
+                    if (info.ContainsKey("unpacked") && Convert.ToBoolean(info["unpacked"]))
                     {
-                        if (item.IsPreload)
+                        continue;
+                    }
+
+                    long size = Convert.ToInt64(info["size"]);
+                    long offset = Convert.ToInt64(info["offset"]);
+
+                    string dir = Path.GetDirectoryName(fullPath);
+                    if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+
+                    fs.Seek(baseOffset + offset, SeekOrigin.Begin);
+                    using (var outFs = new FileStream(fullPath, FileMode.Create, FileAccess.Write))
+                    {
+                        byte[] buffer = new byte[Math.Min(65536, size)];
+                        long remaining = size;
+                        while (remaining > 0)
                         {
-                            bw.Write(newPreloadBytes);
-                        }
-                        else if (item.NewSize > 0)
-                        {
-                            fs.Seek(baseOffset + item.OldOffset, SeekOrigin.Begin);
-                            long remaining = item.NewSize;
-                            while (remaining > 0)
-                            {
-                                int read = fs.Read(copyBuf, 0, (int)Math.Min(copyBuf.Length, remaining));
-                                if (read <= 0) break;
-                                bw.Write(copyBuf, 0, read);
-                                remaining -= read;
-                            }
+                            int read = fs.Read(buffer, 0, (int)Math.Min(buffer.Length, remaining));
+                            if (read <= 0) break;
+                            outFs.Write(buffer, 0, read);
+                            remaining -= read;
                         }
                     }
                 }
             }
+        }
+
+        public static void PackAll(string srcDir, string asarPath)
+        {
+            var filesList = new List<Tuple<string, Dictionary<string, object>>>();
+            var rootFiles = BuildTree(srcDir, filesList);
+
+            long curOffset = 0;
+            foreach (var item in filesList)
+            {
+                item.Item2["offset"] = curOffset.ToString();
+                curOffset += Convert.ToInt64(item.Item2["size"]);
+            }
+
+            var rootObj = new Dictionary<string, object> { { "files", rootFiles } };
+            var jss = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+            string json = jss.Serialize(rootObj);
+            byte[] headerBytes = Encoding.UTF8.GetBytes(json);
+            uint headerSize = (uint)headerBytes.Length;
+
+            using (var outFs = new FileStream(asarPath, FileMode.Create, FileAccess.Write))
+            using (var bw = new BinaryWriter(outFs))
+            {
+                bw.Write((uint)4);
+                bw.Write((uint)(headerSize + 8));
+                bw.Write((uint)(headerSize + 4));
+                bw.Write((uint)(headerSize));
+                bw.Write(headerBytes);
+
+                byte[] buffer = new byte[65536];
+                foreach (var item in filesList)
+                {
+                    long size = Convert.ToInt64(item.Item2["size"]);
+                    if (size == 0) continue;
+
+                    using (var inFs = new FileStream(item.Item1, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    {
+                        int read;
+                        while ((read = inFs.Read(buffer, 0, buffer.Length)) > 0)
+                        {
+                            bw.Write(buffer, 0, read);
+                        }
+                    }
+                }
+            }
+        }
+
+        private static Dictionary<string, object> BuildTree(string dir, List<Tuple<string, Dictionary<string, object>>> filesList)
+        {
+            var res = new Dictionary<string, object>();
+            var dirInfo = new DirectoryInfo(dir);
+
+            var dirs = new List<DirectoryInfo>(dirInfo.GetDirectories());
+            dirs.Sort((a, b) => string.CompareOrdinal(a.Name, b.Name));
+
+            var files = new List<FileInfo>(dirInfo.GetFiles());
+            files.Sort((a, b) => string.CompareOrdinal(a.Name, b.Name));
+
+            foreach (var sub in dirs)
+            {
+                var subFiles = BuildTree(sub.FullName, filesList);
+                res[sub.Name] = new Dictionary<string, object> { { "files", subFiles } };
+            }
+
+            foreach (var f in files)
+            {
+                var fEntry = new Dictionary<string, object>
+                {
+                    { "size", f.Length },
+                    { "offset", "0" }
+                };
+                res[f.Name] = fEntry;
+                filesList.Add(Tuple.Create(f.FullName, fEntry));
+            }
+
+            return res;
         }
 
         public static bool CheckIfEngineInstalled(string asarPath)
@@ -258,6 +257,7 @@ namespace AntigravityPersian
                 Padding = new Padding(15)
             };
 
+            // Embedded Logo
             try
             {
                 byte[] logoBytes = Convert.FromBase64String(EMBEDDED_LOGO_B64);
@@ -291,7 +291,7 @@ namespace AntigravityPersian
             };
             var lblSub = new Label
             {
-                Text = "نسخه ۳.۷ فوق پایدار • پچ بدون افت ساختار و آنپک • انتخاب و پیش‌نمایش فونت • سوییچر داخل برنامه",
+                Text = "نسخه ۳.۵ پایدار • انتخاب و پیش‌نمایش فونت • سوییچر داخل برنامه • کلید میانبر امن Alt+Shift+R",
                 Font = new Font("Segoe UI", 8.5f),
                 ForeColor = Color.FromArgb(166, 173, 200),
                 AutoSize = true,
@@ -477,6 +477,7 @@ namespace AntigravityPersian
             string fontName = GetSelectedFontFamily();
             try
             {
+                // Try from private font collection or system
                 Font foundFont = null;
                 foreach (var fam in pfc.Families)
                 {
@@ -618,7 +619,7 @@ namespace AntigravityPersian
                 btnRestore.BackColor = Color.FromArgb(243, 139, 168);
                 btnRestore.Enabled = true;
 
-                Log("وضعیت: فارسی‌ساز روی برنامه نصب و فعال است.", Color.Lime);
+                Log("وضعیت: فارسی‌ساز روی برنامه نصب است.", Color.Lime);
             }
             else
             {
@@ -677,6 +678,7 @@ namespace AntigravityPersian
                 btnInstall.Enabled = false;
                 KillAntigravity();
 
+                // Install fonts to Windows
                 InstallFontsToWindows(false);
 
                 string backupPath = asarPath + ".backup";
@@ -687,21 +689,43 @@ namespace AntigravityPersian
                     Log("بکاپ اولیه با موفقیت ثبت شد.");
                 }
 
-                string sourceForPatch = File.Exists(backupPath) ? backupPath : asarPath;
+                string tempDir = Path.Combine(Path.GetTempPath(), "AG_Persian_" + Guid.NewGuid().ToString("N"));
+                Log("در حال استخراج موقت فایل‌های برنامه...");
+                AsarHelper.ExtractAll(asarPath, tempDir);
 
-                Log("در حال پچ مستقیم و بدون افت فایل‌های سیستمی (Lossless Stream Patcher)...");
+                string preloadPath = Path.Combine(tempDir, "dist", "preload.js");
+                if (!File.Exists(preloadPath))
+                {
+                    throw new Exception("فایل dist/preload.js در آرشیو یافت نشد!");
+                }
+
+                string preloadContent = File.ReadAllText(preloadPath, Encoding.UTF8);
+                string engineTag = "/* ANTIGRAVITY-PERSIAN-RTL-ENGINE-V3 */";
+
+                if (preloadContent.Contains("ANTIGRAVITY-PERSIAN-RTL-ENGINE"))
+                {
+                    Log("در حال بروزرسانی موتور فارسی و اعمال فونت " + cboFont.SelectedItem + "...");
+                    int idx = preloadContent.IndexOf("/* ANTIGRAVITY-PERSIAN-RTL-ENGINE");
+                    if (idx >= 0) preloadContent = preloadContent.Substring(0, idx).TrimEnd();
+                }
+
                 string fontKey = GetSelectedFontKey();
-                string newEngineCode = PersianEngineSource.GetEngineCode(fontKey);
+                string injectedCode = engineTag + "\r\n" + PersianEngineSource.GetEngineCode(fontKey);
+                preloadContent += "\r\n\r\n" + injectedCode;
+                File.WriteAllText(preloadPath, preloadContent, Encoding.UTF8);
+                Log("موتور کامل فارسی با قابلیت سوییچ فونت داخل برنامه تزریق شد.");
 
-                string tempNewAsar = asarPath + ".new";
-                AsarHelper.PatchPreloadLossless(sourceForPatch, tempNewAsar, newEngineCode);
+                Log("در حال بسته‌بندی مجدد app.asar...");
+                string newAsarPath = asarPath + ".new";
+                AsarHelper.PackAll(tempDir, newAsarPath);
 
                 File.Delete(asarPath);
-                File.Move(tempNewAsar, asarPath);
+                File.Move(newAsarPath, asarPath);
+
+                try { Directory.Delete(tempDir, true); } catch { }
 
                 Log("--------------------------------------------------", Color.Cyan);
-                Log("🎉 عملیات با موفقیت ۱۰۰٪ و بدون خطا انجام شد!", Color.Lime);
-                Log("ساختار بدون دست‌کاری: تمامی فایل‌های آنپک‌شده و ماژول‌ها حفظ شدند", Color.White);
+                Log("🎉 عملیات با موفقیت ۱۰۰٪ به پایان رسید!", Color.Lime);
                 Log("فونت پیش‌فرض: " + cboFont.SelectedItem, Color.White);
                 Log("تغییر فونت بعد از نصب: با دکمه «🎨 فونت» در بالای برنامه", Color.Yellow);
                 Log("--------------------------------------------------", Color.Cyan);
@@ -709,7 +733,7 @@ namespace AntigravityPersian
                 RefreshState();
 
                 var r = MessageBox.Show(
-                    "فارسی‌ساز و فونت با موفقیت اعمال شد و برنامه ۱۰۰٪ آماده اجراست!\n\nآیا می‌خواهید Antigravity اکنون اجرا شود؟",
+                    "فارسی‌ساز و فونت با موفقیت اعمال شد!\n\n(می‌توانید داخل خود برنامه هم با دکمه 🎨 فونت را تغییر دهید)\n\nآیا می‌خواهید Antigravity اکنون اجرا شود؟",
                     "عملیات موفق",
                     MessageBoxButtons.YesNo,
                     MessageBoxIcon.Information
@@ -782,14 +806,30 @@ namespace AntigravityPersian
                 File.Copy(asarPath, backupPath, true);
             }
 
-            string sourceForPatch = File.Exists(backupPath) ? backupPath : asarPath;
-            string tempNewAsar = asarPath + ".new";
-            string newEngineCode = PersianEngineSource.GetEngineCode("vazir");
+            string tempDir = Path.Combine(Path.GetTempPath(), "AG_Persian_" + Guid.NewGuid().ToString("N"));
+            AsarHelper.ExtractAll(asarPath, tempDir);
 
-            AsarHelper.PatchPreloadLossless(sourceForPatch, tempNewAsar, newEngineCode);
+            string preloadPath = Path.Combine(tempDir, "dist", "preload.js");
+            string preloadContent = File.ReadAllText(preloadPath, Encoding.UTF8);
+            string engineTag = "/* ANTIGRAVITY-PERSIAN-RTL-ENGINE-V3 */";
+
+            if (preloadContent.Contains("ANTIGRAVITY-PERSIAN-RTL-ENGINE"))
+            {
+                int idx = preloadContent.IndexOf("/* ANTIGRAVITY-PERSIAN-RTL-ENGINE");
+                if (idx >= 0) preloadContent = preloadContent.Substring(0, idx).TrimEnd();
+            }
+
+            string injectedCode = engineTag + "\r\n" + PersianEngineSource.GetEngineCode("vazir");
+            preloadContent += "\r\n\r\n" + injectedCode;
+            File.WriteAllText(preloadPath, preloadContent, Encoding.UTF8);
+
+            string newAsarPath = asarPath + ".new";
+            AsarHelper.PackAll(tempDir, newAsarPath);
 
             File.Delete(asarPath);
-            File.Move(tempNewAsar, asarPath);
+            File.Move(newAsarPath, asarPath);
+
+            try { Directory.Delete(tempDir, true); } catch { }
             Console.WriteLine("Headless installation completed successfully.");
         }
 
@@ -1226,7 +1266,7 @@ namespace AntigravityPersian
     if (!pill) {{
       pill = document.createElement('button');
       pill.id = 'ag-rtl-toggle-pill';
-      pill.title = 'تغییر راست‌چین / چپ‌چین (کلید میانبر: Alt+Shift+R یا Alt+R)';
+      pill.title = 'تغییر راست‌چین / چپ‌چین (کلید میانبر: Ctrl+Shift+R)';
       pill.onclick = () => {{
         isRtl = !isRtl;
         localStorage.setItem('ag_persian_rtl_active', isRtl ? 'true' : 'false');
@@ -1302,6 +1342,7 @@ namespace AntigravityPersian
     window.addEventListener('keydown', (e) => {{
       const key = (e.key || '').toLowerCase();
 
+      // Prevent accidental Ctrl+Shift+R from triggering browser hard reload / logout
       if (e.ctrlKey && e.shiftKey && key === 'r') {{
         e.preventDefault();
         e.stopPropagation();
@@ -1309,6 +1350,7 @@ namespace AntigravityPersian
         return false;
       }}
 
+      // Safe official shortcuts: Alt+Shift+R, Ctrl+Alt+R, Alt+R
       if ((e.altKey && e.shiftKey && key === 'r') ||
           (e.ctrlKey && e.altKey && key === 'r') ||
           (e.altKey && key === 'r')) {{
@@ -1391,7 +1433,7 @@ namespace AntigravityPersian
 
     applyActiveFont(currentFontId);
     updateUIState();
-    console.log('[Antigravity] Persian RTL v3.7 Lossless Loaded.');
+    console.log('[Antigravity] Persian RTL v3.4 Loaded with Dynamic Font Switcher.');
   }}
 
   if (document.readyState === 'loading') {{
